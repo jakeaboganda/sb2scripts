@@ -1,0 +1,319 @@
+#!/bin/bash
+
+###############################
+# SmartBeacon Flasher
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+pushd $DIR
+
+#color!
+COLOR_RED='\033[0;31m'
+COLOR_GREEN='\033[0;32m'
+NO_COLOR='\033[0m'
+
+#the legal stuff
+expectedDefaultsVersions=()
+expectedBuildTime=""
+expectedFirmwareVersion="4.1.6"
+expectedTxPower="-60"
+expectedCsrBuildIdentifier="bdk_SDK_2_5_1_242_1508261719"
+
+checkFileDefaultVersion="defaultVersion"
+checkFileBuildTime="buildTime"
+checkFileFirmwareVersion="firmwareVersion"
+checkFileTxPower="txPower"
+checkFileCsrBuildId="csrBuildId"
+
+load_expected_values() {
+  fileName=$1
+  while IFS= read -r line; do
+    comp=$(echo $line | sed 's/ .*//')
+    parameter="$(echo $line | sed 's/^[$comp]* //' | cut -d " " -f2-)"
+    #echo "parameter $parameter"
+    if [ "$comp" == "$checkFileDefaultVersion" ]; then
+      expectedDefaultsVersions=(${parameter//|/ })
+      #expectedDefaultsVersions+=($parameter)
+    elif [ "$comp" == "$checkFileBuildTime" ]; then
+      expectedBuildTime=$parameter
+    elif [ "$comp" == "$checkFileFirmwareVersion" ]; then
+      expectedFirmwareVersion=$parameter
+    elif [ "$comp" == "$checkFileTxPower" ]; then
+      expectedTxPower=$parameter
+    elif [ "$comp" == "$checkFileCsrBuildId" ]; then
+      expectedCsrBuildIdentifier=$parameter
+    fi
+  done < "$fileName"
+}
+
+SUCCESS="success (0)"
+is_success() {
+  echo "$1" | grep "$SUCCESS" | wc -c | xargs
+}
+
+# send string to device module
+tmpFile="./_____tmpLog"
+send_command() {
+  currentTmpFile="$tmpFile-$$"
+  rm -f "$currentTmpFile"
+  echo "$1" > $currentTmpFile
+  echo "num $#"
+  if [ "$#" -eq 3 ]; then
+    echo "$(./beaconOperation "$2" -w "$currentTmpFile")"
+  elif [ "$#" -eq 4 ]; then
+    echo "$(./beaconOperation "$2" -w "$currentTmpFile" -e "$3")"
+  elif [ "$#" -eq 5 ]; then
+    echo "$(./beaconOperation "$2" -w "$currentTmpFile" -e "$3" -t "$4")"
+  fi
+  rm -f "$currentTmpFile"
+}
+
+remove_all_tmp() {
+  rm -f "$tmpFile*"
+}
+
+deviceWildCard="/dev/cu.usbmodem*"
+how_many_devices_are_connected()
+{
+  echo "$( (ls -l $deviceWildCard ) 2>/dev/null | wc -l | xargs)"
+}
+
+#get output
+get_output() {
+  ./beaconOperation $1
+}
+
+send_return() {
+  send_command "" $1
+}
+
+developmentEnvPassword="1010"
+defaultsv1Password="76db7e11-e982-468d-a7a4-8c95c45e45e9"
+defaultsv2Password="986dbc68-ecbe-11e6-b006-92361f002671"
+reset_data() {
+  deviceName=$1
+  password=$developmentEnvPassword
+  beaconInformation="$(send_command "get_beacon_information" $deviceName $SUCCESS)"
+  defaultsVersion=$(echo "$beaconInformation" | grep Defaults\ version | sed -e 's/.*Defaults version: \(.*\).*/\1/g' | xargs)
+  if [ "$defaultsVersion" -eq "1" ]; then
+    password="$defaultsv2Password"
+  elif [ "$defaultsVersion" -eq "2" ]; then
+    password="$defaultsv2Password"
+  fi
+  success="$(send_command "unlock" $deviceName)"
+  success=$(send_command "$password" $deviceName)
+  success="$(send_command "reset_data" $deviceName "$SUCCESS")"
+}
+
+OK_CODE="${COLOR_GREEN}OK${NO_COLOR}"
+NG_CODE="${COLOR_RED}NG${NO_COLOR}"
+check_beacons() {
+  deviceName=$1
+  # call reset_data
+  result="$(send_command "reset_data" $deviceName "$SUCCESS" 3)"
+
+  # display the new beacon information
+  while true; do
+    beaconInformation="$(send_command "get_beacon_information" $deviceName $SUCCESS)"
+    if (("$(is_success "$beaconInformation")" != "0")); then
+      break
+    fi
+  done
+
+  #Defaults Version
+  defaultsVersion=$(echo "$beaconInformation" | grep Defaults\ version | sed -e 's/.*Defaults version: \(.*\).*/\1/g' | xargs)
+  #echo $defaultsVersion
+  defaultsVersionOk="$NG_CODE"
+  for expectedDefaultVersion in "${expectedDefaultsVersions[@]}"; do
+    #echo $expectedDefaultVersion
+    if [ "$expectedDefaultVersion" -eq "$defaultsVersion" ]; then
+      defaultsVersionOk="$OK_CODE"
+      break
+    fi
+  done
+  
+
+  #Build Time
+  buildTime=$(echo "$beaconInformation" | grep Build\ time | sed -e 's/.*Build time: \(.*\)/\1/g' | xargs)
+  if [ "$buildTime" == "$expectedBuildTime" ]; then
+    buildTimeOk="$OK_CODE"
+  else
+    buildTimeOk="$NG_CODE"
+  fi
+
+  #Firmware Version
+  fwVersion=$(echo "$beaconInformation" | grep Firmware\ version | sed -e 's/.*Firmware version: \(.*\)/\1/g' | xargs)
+  if [ "$fwVersion" == "$expectedFirmwareVersion" ]; then
+    fwVersionOk="$OK_CODE"
+  else
+    fwVersionOk="$NG_CODE"
+  fi
+
+  #Serial Number
+  serialNumber=$(echo "$beaconInformation" | grep Serial\ number | sed -e 's/.*Serial number: \([[:alnum:]-]*\)/\1/g' | xargs)
+  if [ "${#serialNumber}" != "0" ]; then
+    serialNumberOk="$OK_CODE"
+  else
+    serialNumberOk="$NG_CODE"
+  fi
+
+  #TX Power
+  txPower=$(echo "$beaconInformation" | grep iBeacon\ measured\ transmit\ power | sed -e 's/.*iBeacon measured transmit power: \(.*\) (.*)/\1/g' | xargs)
+  if [ "$txPower" -eq "$expectedTxPower" ]; then
+    txPowerOk="$OK_CODE"
+  else
+    txPowerOk="$NG_CODE"
+  fi
+
+  #CSR Version
+  csrBuildIdentifier=$(echo "$beaconInformation" | grep CSR\ build\ identifier | sed -e 's/.*CSR build identifier: \(.*\)/\1/g' | xargs)
+  if [ "$csrBuildIdentifier" == "$expectedCsrBuildIdentifier" ]; then
+    csrBuildIdentifierOk="$OK_CODE"
+  else
+    csrBuildIdentifierOk="$NG_CODE"
+  fi
+
+  echo -e "--------------------------------------------------------"
+  echo -e "[$deviceName]"
+  echo -e "Defaults Version:  [$defaultsVersionOk] : $defaultsVersion"
+  echo -e "Build Time:        [$buildTimeOk] : $buildTime"
+  echo -e "Firmware Version:  [$fwVersionOk] : $fwVersion"
+  echo -e "Serial Number:     [$serialNumberOk] : $serialNumber"
+  echo -e "TX Power:          [$txPowerOk] : $txPower"
+  echo -e "CSR Build ID:      [$csrBuildIdentifierOk] : $csrBuildIdentifier"
+  echo -e "--------------------------------------------------------"
+}
+
+# check the parameters.
+# TODO: much more graceful checking
+paramFlagAppBin="--bin"
+paramFlagCheck="--check"
+paramFlagReset="--reset"
+
+TRUE="1"
+FALSE="0"
+
+checkOnly="$TRUE"
+hasInvalidParameters="$FALSE"
+ignoreNext="$FALSE"
+doReset="$FALSE"
+
+if (($# <= 1)); then
+  hasInvalidParameters="$TRUE"
+else
+  i=1
+  while (($i <= $#)); do
+    param="${!i}"
+    if [ "$param" == "$paramFlagCheck" ]; then
+      #--check
+      ((i=$i+1))
+      checkFile="${!i}"
+    elif [ "$param" == "$paramFlagAppBin" ]; then
+      #--bin
+      ((i=$i+1))
+      appBin="${!i}"
+      checkOnly="$FALSE"
+    elif [ "$param" == "$paramFlagReset" ]; then
+      #--no-reset
+      doReset="$TRUE"
+    else
+      hasInvalidParameters="$TRUE"
+      break;
+    fi
+    ((i=$i+1))
+  done
+fi
+
+#check parameters
+if [ "$hasInvalidParameters" != "$TRUE" -a "$appBin" != "" -a ! -f "$appBin" ]; then
+  hasInvalidParameters="$TRUE"
+  echo "error: appbin invalid $appBin"
+fi
+
+if [ "$hasInvalidParameters" != "$TRUE" -a ! -f "$checkFile" ]; then
+  hasInvalidParameters="$TRUE"
+  echo "error: checkfile invalid $checkFile"
+fi
+
+if [ "$hasInvalidParameters" == "$TRUE" ]; then
+  echo "($$) $0"
+  echo "       Usage:"
+  echo "          $0 [$paramFlagAppBin <application binary>] $paramFlagCheck <checkfile> [$paramFlagReset]"
+  echo ""
+  echo "       Examples:"
+  echo "          * Flash application.bin, reset iBeacon parameters, and check with 4.1.5-check:"
+  echo "            $0 $paramFlagAppBin ./application.bin $paramFlagCheck ./4.1.5-check $paramFlagReset"
+  echo ""
+  echo "          * Reset, and check with 4.1.5-check:"
+  echo "            $0 $paramFlagCheck ./4.1.5-check $paramFlagReset"
+  echo ""
+  echo "          * Flash application.bin, and check with 4.1.5-check:"
+  echo "            $0 $paramFlagAppBin ./application.bin $paramFlagCheck ./4.1.5-check"
+  echo ""
+  echo "          * Check only:"
+  echo "            $0 $paramFlagCheck ./4.1.5-check"
+  exit
+fi
+
+remove_all_tmp
+
+load_expected_values $checkFile
+
+if (($(how_many_devices_are_connected) == "0")); then
+  echo "no SB2's connected"
+  exit
+fi
+
+if [ "$checkOnly" == "$FALSE" ]; then
+  #input verbosity
+
+  #check application binary
+  if [ ! -e $appBin ]; then
+    echo "($$) invalid application binary."
+    exit
+  fi
+
+  numberOfDevices=0
+  #fire up the updater
+  for fd in $deviceWildCard; do
+    ./sb2Updater $fd $appBin > /dev/null 2>&1 & 
+    PIDS[$numberOfDevices]=$!
+    (( numberOfDevices=$numberOfDevices+1 ))
+    echo "$0: flashing beacon $numberOfDevices"
+  done
+
+  #wait for all beacons to finish their shit
+  for pid in ${PIDS[@]}; do
+    wait $pid #&& echo "$pid exited"
+    sleep 1 #sleep is for the weak
+  done
+
+  echo "$0: beacons now writing to internal flash"
+
+  #wait for number
+  connectedDevices="-1"
+  while (($(how_many_devices_are_connected) != "$numberOfDevices"))
+  do
+    if [ "$connectedDevices" != "$(how_many_devices_are_connected)" ]; then
+      connectedDevices="$(how_many_devices_are_connected)"
+      echo "$0 : $connectedDevices / $numberOfDevices done." 
+    fi
+    sleep 1 #sleep is for the weak
+  done
+
+  echo "$0 : $(how_many_devices_are_connected) / $numberOfDevices done."
+fi
+
+echo "$0: now checking"
+
+#fire up the checker
+for fd in $deviceWildCard; do
+  if [ "$doReset" == "$TRUE" ]; then
+    reset_data $fd
+  fi
+  check_beacons $fd
+done
+
+popd $DIR
+
+exit

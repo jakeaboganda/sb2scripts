@@ -1,0 +1,6 @@
+#!/bin/sh
+dirName=$(date +"%Y%m%d")
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+mkdir -p z$DIR/logs
+mkdir -p $DIR/logs/$dirName
+$DIR/src/sb2Flasher --bin $DIR/src/TenTenSmartBeacon2_application_v4.2.5.bin --check $DIR/src/4p2p5.checkfile --reset   | tee $DIR/logs/$dirName/`ls -l $DIR/$dirName/ | sed /^total/d | wc -l | xargs`
